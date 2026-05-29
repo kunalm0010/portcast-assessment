@@ -1,0 +1,36 @@
+[project]
+name = "portcast-assessment"
+version = "0.1.0"
+description = "Distributed rate limiter take-home assessment"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.115.0",
+  "uvicorn>=0.30.0",
+  "redis>=5.0.0",
+  "pydantic>=2.8.0",
+  "pyyaml>=6.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0.0",
+  "httpx>=0.27.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+  "integration: tests that require a running Redis instance",
+]
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["app*", "rate_limiter*"]
+
+[tool.setuptools.package-data]
+rate_limiter = ["lua/*.lua"]

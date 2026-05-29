@@ -1,0 +1,39 @@
+tiers:
+  free:
+    default:
+      rate_per_sec: 10
+      burst: 20
+  standard:
+    default:
+      rate_per_sec: 50
+      burst: 100
+  enterprise:
+    default:
+      rate_per_sec: 100
+      burst: 200
+
+routes:
+  "GET /v1/search":
+    free:
+      rate_per_sec: 5
+      burst: 10
+    standard:
+      rate_per_sec: 25
+      burst: 50
+    enterprise:
+      rate_per_sec: 80
+      burst: 160
+  "POST /v1/reports":
+    free:
+      rate_per_sec: 2
+      burst: 4
+    standard:
+      rate_per_sec: 10
+      burst: 20
+    enterprise:
+      rate_per_sec: 40
+      burst: 80
+  "GET /v1/demo":
+    free:
+      rate_per_sec: 3
+      burst: 6

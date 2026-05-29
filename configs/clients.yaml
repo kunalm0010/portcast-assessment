@@ -1,0 +1,10 @@
+clients:
+  client-free-1: free
+  client-standard-1: standard
+  client-enterprise-1: enterprise
+
+overrides:
+  client-enterprise-1:
+    "GET /v1/shipments":
+      rate_per_sec: 150
+      burst: 300
