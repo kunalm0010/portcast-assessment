@@ -51,13 +51,18 @@ def rate_limit_config() -> RateLimitConfig:
 
 
 @pytest.fixture
-def redis_store(redis_url: str, require_redis: None) -> RedisRateLimitStore:
+def redis_store(redis_url: str, require_redis: None, redis_client) -> RedisRateLimitStore:
+    """Redis store fixture that flushes before and after each test."""
     timeout_ms = float(os.getenv("REDIS_TIMEOUT_MS", "100"))
     store = RedisRateLimitStore(
         redis_url=redis_url,
         socket_timeout_sec=timeout_ms / 1000.0,
     )
+    # Flush before test starts
+    redis_client.flushdb()
     yield store
+    # Flush after test ends
+    redis_client.flushdb()
     store.close()
 
 
