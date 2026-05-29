@@ -17,7 +17,7 @@ def api_client(rate_limiter) -> TestClient:
 
     @app.get("/v1/demo")
     def demo() -> dict[str, str]:
-        return {"ok": True}
+        return {"ok": "true"}
 
     app.add_middleware(RateLimitMiddleware, limiter=rate_limiter)
     return TestClient(app)
