@@ -74,6 +74,19 @@ class CircuitBreaker:
             if len(self._failures) >= self.failure_threshold:
                 self._trip(now)
 
+    def reset_on_failover(self) -> None:
+        """Reset circuit breaker after Redis failover.
+        
+        Called when failover is detected, allows circuit to probe new primary
+        immediately instead of waiting for open_duration_sec timeout.
+        """
+        with self._lock:
+            self._state = CircuitState.HALF_OPEN
+            self._success_streak = 0
+            self._failures.clear()
+            self._opened_at = None
+            self._half_open_probe_in_flight = False
+
     def _maybe_transition_from_open(self) -> None:
         if self._state != CircuitState.OPEN or self._opened_at is None:
             return
