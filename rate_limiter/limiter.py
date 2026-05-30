@@ -27,6 +27,10 @@ class RateLimiter:
     def circuit_breaker(self) -> CircuitBreaker:
         return self._circuit
 
+    def set_config(self, config: RateLimitConfig) -> None:
+        """Update config (used by config reloader)."""
+        self._config = config
+
     def allow(self, client_id: str, route: str) -> AllowResult:
         if not client_id or not client_id.strip():
             return AllowResult(
