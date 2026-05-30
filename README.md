@@ -1,4 +1,4 @@
-# portcast-assessment
+# Distributed Rate Limiter
 
 Distributed per-client, per-route rate limiting for a horizontally scaled API. Full design rationale is in [`docs/DESIGN.md`](docs/DESIGN.md).
 
@@ -17,7 +17,7 @@ docker compose up --build
 Example request:
 
 ```bash
-curl -s -H "X-Client-Id: client-free-1" http://localhost:8080/v1/demo
+curl -s -H "X-Client-Id: client-free-1" http://localhost:8080/v1/demo -v
 ```
 
 ## Libraries and why they were chosen
