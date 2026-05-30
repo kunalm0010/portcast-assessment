@@ -1,6 +1,6 @@
 # Distributed Rate Limiter
 
-Distributed per-client, per-route rate limiting for a horizontally scaled API. Full design rationale is in [`docs/DESIGN.md`](docs/DESIGN.md).
+Distributed per-client, per-route rate limiting for a horizontally scaled API. Full design rationale is in [`DESIGN.md`](DESIGN.md).
 
 ## Quick start (one command)
 
@@ -33,7 +33,7 @@ curl -s -H "X-Client-Id: client-free-1" http://localhost:8080/v1/demo -v
 
 No ORM or SQL database: limits are enforced in Redis on the hot path.
 
-See [`docs/DESIGN.md`](docs/DESIGN.md) for architecture, failure semantics, and load-test plan.
+See [`DESIGN.md`](DESIGN.md) for architecture, failure semantics, and load-test plan.
 
 ## Code map (where to look)
 
@@ -53,7 +53,8 @@ See [`docs/DESIGN.md`](docs/DESIGN.md) for architecture, failure semantics, and 
 | [`docker-compose.yml`](docker-compose.yml) | Redis, replica, two APIs, nginx |
 | [`tests/unit/`](tests/unit/) | Circuit breaker, config resolution |
 | [`tests/integration/`](tests/integration/) | Redis, cross-instance, fail-closed, middleware |
-| [`load/scenarios/`](load/scenarios/) | k6 load scripts |
+| [`load/scenarios/`](load/scenarios/) | k6 load scripts (baseline, burst, cross_instance, concurrent, hot_routes, peak) |
+| [`load/common.js`](load/common.js) | Shared clients/routes aligned with configs |
 
 ## Common commands
 
@@ -77,9 +78,21 @@ make logs
 make down
 
 # Load tests (requires k6: https://grafana.com/docs/k6/latest/set-up/install-k6/)
+docker compose up --build -d
+make load-baseline      # 200 RPS mixed clients/routes, 30s
+make load-burst         # 100 RPS single enterprise client, 2s
+make load-cross_instance # 50 RPS via nginx; proves global quota
+make load-concurrent    # 30 VUs, multiple clients/routes
+make load-hot_routes    # 150 RPS, 80% on top 5 routes
+make load-peak          # ramp 100→300→600 RPS
+make load-all           # run every scenario
+
+# Or via script (writes load/results/<scenario>.json):
 ./scripts/run_load.sh baseline
-./scripts/run_load.sh burst
-BASE_URL=http://localhost:8080 ./scripts/run_load.sh cross_instance
+BASE_URL=http://localhost:8080 ./scripts/run_load.sh peak
+```
+
+See [`DESIGN.md` §6](DESIGN.md#6-load-test-results--bottlenecks) for scenario descriptions and measured results.
 ```
 
 ## Environment variables
@@ -103,5 +116,5 @@ nginx/               # Load balancer config
 tests/unit/          # No Redis required
 tests/integration/   # Requires Redis
 load/scenarios/      # k6 scripts
-docs/DESIGN.md       # Design document
+DESIGN.md            # Design document
 ```

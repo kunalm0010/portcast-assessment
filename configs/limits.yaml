@@ -37,3 +37,13 @@ routes:
     free:
       rate_per_sec: 3
       burst: 6
+  "GET /v1/quotes":
+    free:
+      rate_per_sec: 4
+      burst: 8
+    standard:
+      rate_per_sec: 20
+      burst: 40
+    enterprise:
+      rate_per_sec: 60
+      burst: 120

@@ -12,4 +12,15 @@ if ! command -v k6 >/dev/null 2>&1; then
 fi
 
 SCENARIO="${1:-baseline}"
-k6 run "load/scenarios/${SCENARIO}.js"
+SCRIPT="load/scenarios/${SCENARIO}.js"
+RESULT="load/results/${SCENARIO}.json"
+
+if [[ ! -f "$SCRIPT" ]]; then
+  echo "Unknown scenario: ${SCENARIO}"
+  echo "Available: baseline burst cross_instance concurrent hot_routes peak"
+  exit 1
+fi
+
+mkdir -p load/results
+echo "Running ${SCENARIO} against ${BASE_URL}..."
+k6 run --summary-trend-stats="avg,med,p(90),p(95),p(99),max" --summary-export="${RESULT}" "${SCRIPT}"

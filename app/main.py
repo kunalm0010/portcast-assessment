@@ -34,6 +34,11 @@ def reports() -> dict[str, str]:
     return {"message": "reports endpoint"}
 
 
+@app.get("/v1/quotes")
+def quotes() -> dict[str, str]:
+    return {"message": "quotes endpoint"}
+
+
 @app.get("/v1/shipments")
 def shipments() -> dict[str, str]:
     return {"message": "shipments endpoint"}

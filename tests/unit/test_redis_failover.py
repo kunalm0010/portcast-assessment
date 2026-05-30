@@ -23,20 +23,17 @@ def test_failover_manager_initialization():
 def test_failover_manager_calls_callback_on_failover():
     """Test that failover callback is called when replica is promoted."""
     callback = MagicMock()
-    
-    with patch.object(RedisFailoverManager, '_is_primary_healthy', return_value=False):
-        with patch.object(RedisFailoverManager, '_promote_replica') as mock_promote:
-            manager = RedisFailoverManager(
-                primary_url="redis://localhost:6379/0",
-                replica_url="redis://localhost:6380/0",
-                on_failover=callback,
-            )
-            
-            # Mock the monitoring method to trigger failure detection
-            manager._consecutive_failures = 3
-            manager._promote_replica()
-            
-            callback.assert_called_once()
+    manager = RedisFailoverManager(
+        primary_url="redis://localhost:6379/0",
+        replica_url="redis://localhost:6380/0",
+        on_failover=callback,
+    )
+
+    with patch.object(manager._replica_client, "execute_command", return_value="OK"):
+        manager._promote_replica()
+
+    callback.assert_called_once()
+    assert manager._is_monitoring is False
 
 
 def test_failover_threshold_triggers_promotion():

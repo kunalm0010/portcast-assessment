@@ -1,8 +1,10 @@
 PYTHON ?= python3
 COMPOSE ?= docker compose
 REDIS_TEST_URL ?= redis://localhost:6379/1
+BASE_URL ?= http://localhost:8080
 
-.PHONY: setup up down logs test test-unit test-integration load load-baseline load-burst
+.PHONY: setup up down logs test test-unit test-integration load load-all \
+	load-baseline load-burst load-cross_instance load-concurrent load-hot_routes load-peak
 
 setup:
 	$(PYTHON) -m pip install ".[dev]"
@@ -34,10 +36,24 @@ run-api:
 	REDIS_URL=redis://localhost:6379/0 uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 
 load-baseline:
-	k6 run load/scenarios/baseline.js
+	BASE_URL=$(BASE_URL) ./scripts/run_load.sh baseline
 
 load-burst:
-	k6 run load/scenarios/burst.js
+	BASE_URL=$(BASE_URL) ./scripts/run_load.sh burst
+
+load-cross_instance:
+	BASE_URL=$(BASE_URL) ./scripts/run_load.sh cross_instance
+
+load-concurrent:
+	BASE_URL=$(BASE_URL) ./scripts/run_load.sh concurrent
+
+load-hot_routes:
+	BASE_URL=$(BASE_URL) ./scripts/run_load.sh hot_routes
+
+load-peak:
+	BASE_URL=$(BASE_URL) ./scripts/run_load.sh peak
+
+load-all: load-baseline load-burst load-cross_instance load-concurrent load-hot_routes load-peak
 
 load:
 	$(MAKE) load-baseline

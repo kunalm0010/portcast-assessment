@@ -1,20 +1,58 @@
-# DESIGN.md — Distributed Rate Limiter
+# Distributed Rate Limiter
+ 
+In this document, I have captured the requirements, my design decisions & tradeoffs to meet the current requirements, 
+the code details, failure semantics, load test results after I executed them locally, a future scalability horizon
+and where I leveraged AI to help me achieve the project goal.
 
 ## Table of Contents
 
+- [1. System Architecture Overview](#1-system-architecture-overview)
+  - [Requirements and Scale](#requirements-and-scale)
+  - [High-level flow](#high-level-flow)
+  - [1.1 Code map](#11-code-map)
+  - [1.2 How to run](#12-how-to-run)
+- [2. Integration Shape & Strategy](#2-integration-shape--strategy)
+  - [Chosen approach](#chosen-approach)
+  - [Rejected options](#rejected-options)
+- [3. Rate Limiting Algorithm](#3-rate-limiting-algorithm)
+  - [Selected algorithm: token bucket](#selected-algorithm-token-bucket)
+- [4. Storage Choice](#4-storage-choice)
+  - [Why redis?](#why-redis)
+  - [Tradeoff](#tradeoff)
+  - [Redis + Lua implementation](#redis--lua-implementation)
+  - [Capacity at launch](#capacity-at-launch)
+  - [Quota model](#quota-model)
+  - [Config hot-reload (SIGHUP)](#config-hot-reload-sighup)
+  - [In-memory fallback](#in-memory-fallback)
+- [5. Failure Semantics](#5-failure-semantics)
+  - [HTTP responses](#http-responses)
+  - [Circuit breaker](#circuit-breaker)
+  - [Code layout](#code-layout)
+  - [Redis failover](#redis-failover)
+  - [Monitoring before sharding](#monitoring-before-sharding)
+- [6. Load Test Results & Bottlenecks](#6-load-test-results--bottlenecks)
+  - [Automated tests (implemented)](#automated-tests-implemented)
+  - [Planned load scenarios](#planned-load-scenarios)
+  - [Metrics to report](#metrics-to-report)
+  - [Results (fill after run)](#results-fill-after-run)
+  - [Expected bottlenecks (before tests)](#expected-bottlenecks-before-tests)
+- [7. Future Scalability (12-Month Horizon)](#7-future-scalability-12-month-horizon)
+- [8. AI Assistance Disclosure](#8-ai-assistance-disclosure)
+
 ## 1. System Architecture Overview
 
-A distributed rate limiter is required for a public API that runs on multiple instances. Limits must apply **per client** and **per route**, and the same quota must hold no matter which instance handles the request. 
+A distributed rate limiter is required for a public API that runs on multiple instances. 
+Limits must apply **per client** and **per route**, and the same quota must hold no matter which instance handles the request.
 
 ### **Requirements and Scale:**
 
 The rate limiter should easily handle the following requirements**:**
 
-- ~5,000 clients (expected to grow to 15000 in a year)
+- ~5,000 clients (expected to grow to 50000 in a year)
 - ~40 API routes
 - ~3,000 RPS on average
 - ~15,000 RPS at peak
-- Bursty traffic expected per client (for example ~100 RPS, then idle). 
+- Bursty traffic expected per client (for example ~100 RPS, then idle).
 - The limiter must add <**10 ms** of latency per request (to ensure overall API SLA of <200ms is not impacted by rate limiting)
 - Three client tiers exist: `free`, `standard`, and `enterprise`.
 
@@ -26,8 +64,10 @@ The rate limiter should easily handle the following requirements**:**
 4. A single **Redis** call (Lua script) updates shared token state and returns allow or deny.
 5. If allowed, the handler runs. If denied, the API returns **429**. If the limiter cannot run, the API returns **503** (fail-closed).
 
-**Components:**
+**Note:** In a real production application, figuring out the tier for a client using the clientId will not be done via configuration,
+but for this demo to work, have hardcoded a few clients and their tiers in the relevant configurations.
 
+**Components:**
 
 | Component                                                | Role                                                                        |
 | -------------------------------------------------------- | --------------------------------------------------------------------------- |
@@ -39,7 +79,30 @@ The rate limiter should easily handle the following requirements**:**
 | Config files (`limits.yaml`, `clients.yaml`)             | Tier defaults, route overrides, client → tier mapping                       |
 
 
-**Diagram:** *(add architecture diagram here: client → nginx → api-1 / api-2 → middleware → Redis primary)*
+**Diagram:**
+
+![Architecture overview](docs/assets/architecture.png)
+
+<details>
+<summary>Mermaid source (renders on GitHub; use the PNG above in editors without Mermaid preview)</summary>
+
+```mermaid
+flowchart LR
+    client[Client] -->|"X-Client-Id + request"| nginx[Nginx LB]
+    nginx --> api1[api-1]
+    nginx --> api2[api-2]
+    api1 --> mw1[RateLimitMiddleware]
+    api2 --> mw2[RateLimitMiddleware]
+    mw1 --> limiter1[rate_limiter]
+    mw2 --> limiter2[rate_limiter]
+    limiter1 -->|"Lua EVAL"| redisPrimary[Redis primary]
+    limiter2 -->|"Lua EVAL"| redisPrimary
+    redisPrimary -.->|async replicate| redisReplica[Redis replica]
+    mw1 -->|"429 / 503 / pass"| handler1[Route handler]
+    mw2 -->|"429 / 503 / pass"| handler2[Route handler]
+```
+
+</details>
 
 #### *NOTE:*
 
@@ -47,22 +110,25 @@ The rate limiter should easily handle the following requirements**:**
 
 ### 1.1 Code map
 
-Evaluators can use this table to navigate the implementation. More detail on libraries is in the [README](../README.md).
+Evaluators can use this table to navigate the implementation. More detail on libraries is in the [README](README.md).
 
 
-| Path                          | Responsibility                                      |
-| ----------------------------- | --------------------------------------------------- |
-| `app/main.py`                 | FastAPI application and sample routes               |
-| `app/middleware.py`           | Middleware: client id, route key, 400 / 429 / 503   |
-| `rate_limiter/limiter.py`     | Single entry `allow(client_id, route)`              |
-| `rate_limiter/redis_store.py` | Redis pool; runs `lua/token_bucket.lua`             |
-| `rate_limiter/circuit.py`     | Circuit breaker for fail-closed behavior            |
-| `rate_limiter/config.py`      | Loads YAML; resolves tier → route → client override |
-| `rate_limiter/factory.py`     | Builds limiter from environment variables           |
-| `configs/limits.yaml`         | Tier defaults and route overrides                   |
-| `configs/clients.yaml`        | Client tier mapping and optional overrides          |
-| `nginx/nginx.conf`            | Round-robin to `api-1` and `api-2`                  |
-| `docker-compose.yml`          | Redis, replica, two APIs, nginx on port 8080        |
+| Path                                | Responsibility                                                         |
+| ----------------------------------- | ---------------------------------------------------------------------- |
+| `app/main.py`                       | FastAPI application and sample routes                                  |
+| `app/middleware.py`                 | Middleware: client id, route key, 400 / 429 / 503                      |
+| `rate_limiter/limiter.py`           | Single entry `allow(client_id, route)`                                 |
+| `rate_limiter/redis_store.py`       | Redis pool; runs `lua/token_bucket.lua`                                |
+| `rate_limiter/lua/token_bucket.lua` | Atomic token bucket (Redis HASH + EXPIRE)                              |
+| `rate_limiter/circuit.py`           | Circuit breaker for fail-closed behavior                               |
+| `rate_limiter/config.py`            | Loads YAML; resolves client → route → tier policy                      |
+| `rate_limiter/config_reloader.py`   | SIGHUP-driven YAML hot-reload                                          |
+| `rate_limiter/redis_failover.py`    | Optional primary health monitor + replica promotion                    |
+| `rate_limiter/factory.py`           | Builds limiter from env; wires reloader and optional failover manager  |
+| `configs/limits.yaml`               | Tier defaults and route overrides                                      |
+| `configs/clients.yaml`              | Client tier mapping and optional overrides                             |
+| `nginx/nginx.conf`                  | Round-robin to `api-1` and `api-2`                                     |
+| `docker-compose.yml`                | Redis, replica, two APIs, nginx on port 8080                           |
 
 
 ### 1.2 How to run
@@ -98,25 +164,43 @@ docker compose up -d redis
 REDIS_URL=redis://localhost:6379/1 pytest -q
 ```
 
-OR: 
+OR:
 
 ```bash
 make test-unit
 make test-integration (see README).
 ```
 
-**Load tests (prerequisite: k6 , eg: brew install k6):**
+**Load tests (prerequisite: k6, e.g. `brew install k6`):**
 
 ```bash
 docker compose up --build -d
-./scripts/run_load.sh baseline 
-./scripts/run_load.sh burst
-./scripts/run_load.sh cross_instance
+make load-all
+# or individual scenarios:
+make load-baseline load-burst load-cross_instance load-concurrent load-hot_routes load-peak
 ```
 
-Set `BASE_URL` if needed (default `http://localhost:8080`).
+Set `BASE_URL` if needed (default `http://localhost:8080`). See [§6 Load Test Results](#6-load-test-results--bottlenecks) for scenario descriptions and measured numbers.
 
-### Note: Please check [[README.md](../README.md)] for more details on how the code and tests.
+**Environment variables:**
+
+| Variable | Default | Purpose |
+| -------- | ------- | ------- |
+| `REDIS_URL` | `redis://localhost:6379/0` | Redis primary |
+| `REDIS_REPLICA_URL` | *(empty)* | Enables in-process failover manager when set |
+| `REDIS_TIMEOUT_MS` | `5` (50 in Docker) | Redis socket timeout |
+| `REDIS_FAILOVER_CHECK_INTERVAL_SEC` | `5` | Primary health poll interval |
+| `REDIS_FAILOVER_THRESHOLD` | `3` | Consecutive failures before replica promotion |
+| `CIRCUIT_FAILURE_THRESHOLD` | `5` | Failures to open circuit |
+| `CIRCUIT_FAILURE_WINDOW_SEC` | `10` | Rolling failure window |
+| `CIRCUIT_OPEN_DURATION_SEC` | `30` | Open → half-open cooldown |
+| `CIRCUIT_SUCCESS_THRESHOLD` | `3` | Probes to close circuit |
+| `CONFIG_DIR` / `LIMITS_PATH` / `CLIENTS_PATH` | `./configs/...` | Config file locations |
+| `INSTANCE_NAME` | `local` | Shown on `/health` |
+
+See [`.env.example`](.env.example) for a copy-paste template.
+
+### Note: Please check [README.md](README.md) for more details on how the code and tests.
 
 ---
 
@@ -134,6 +218,13 @@ Rate limiting is applied in **middleware** that runs on every request before bus
 
 
 Config changes are applied at the middleware layer (reload YAML or redeploy instances) without updating many downstream services separately.
+
+**Middleware details** (`app/middleware.py`):
+
+- **Exempt paths** (no rate limit check): `/health`, `/docs`, `/openapi.json`, `/redoc`
+- Route key format: `{METHOD} {path}` (for example `GET /v1/demo`)
+- Missing or unknown `X-Client-Id` → **400** (rejected before Redis is called)
+- Allowed responses include `X-RateLimit-Remaining` and `X-RateLimit-Reset` headers
 
 ### Rejected options
 
@@ -165,7 +256,7 @@ A library is still used, but only as implementation code called from middleware�
 
 ## 4. Storage Choice
 
-Selected Redis to be the storage option for storing the counters for each client and each route. 
+Selected Redis to be the storage option for storing the counters for each client and each route.
 
 ### Why redis?
 
@@ -184,12 +275,15 @@ Selected Redis to be the storage option for storing the counters for each client
 
 ### Redis + Lua implementation
 
-Each limit is keyed as `rl:{client_id}:{route_template}` (method + path template, not unbounded URLs).
+Each limit is keyed as `rl:{client_id}:{METHOD} {path}` (for example `rl:client-free-1:GET /v1/demo`). The route segment is the HTTP method plus path, not unbounded URLs with query parameters.
 
 - All instances are stateless; **Redis primary** holds tokens and last refill time per key.
-- Each check runs as **one Lua script** on Redis: compute refill from elapsed time, subtract one token if available, save state, return `allowed`, `remaining`, `reset_at`.
+- State is stored as a Redis **HASH** with fields `tokens` and `last_refill`.
+- Each check runs as **one Lua script** on Redis: compute refill from elapsed time, subtract one token if available, save state, return `allowed`, `remaining`, `reset_at`, `retry_after`.
+- Inactive keys expire automatically: TTL is `max(60, ceil((burst / rate) * 2) + 60)` seconds.
+- The script is registered once via `register_script` for efficient `EVALSHA` on subsequent calls.
 - One round-trip per request keeps latency low and avoids race conditions when many instances hit the same client at once.
-- Connection pooling and a **2–5 ms** client timeout are used so a slow Redis does not block the API for hundreds of milliseconds.
+- Connection pooling and a **2–5 ms** client timeout are used so a slow Redis does not block the API for hundreds of milliseconds (Docker compose uses 50 ms for local dev stability).
 
 ### Capacity at launch
 
@@ -201,7 +295,12 @@ A **replica** is deployed for high availability. The application reads and write
 
 Limits are defined in YAML, not hardcoded.
 
-**Resolution order:** tier default → route override → client override.
+**Resolution order** (as implemented in `rate_limiter/config.py`):
+
+1. Client must exist in `clients.yaml` (unknown client → **400**)
+2. **Client override** — per-client route override in `clients.yaml`
+3. **Route override** — tier-specific limit for that route in `limits.yaml`
+4. **Tier default** — fallback from the client's tier
 
 
 | Tier       | rate/sec | burst | Notes                                           |
@@ -223,7 +322,22 @@ Example route overrides (top or expensive routes):
 
 Optional per-client overrides can raise limits for specific enterprise tenants on specific routes without changing the enterprise tier for everyone.
 
-Config is reloaded at startup and over a SIGHUP signal. During rollout, instances may briefly use different limits; that is accepted in favor of keeping the API available.
+### Config hot-reload (SIGHUP)
+
+Config is loaded at startup and can be hot-reloaded without restarting the API process. During rollout, instances may briefly use different limits; that is accepted in favor of keeping the API available.
+
+**Implementation** (`rate_limiter/config_reloader.py`, wired in `rate_limiter/factory.py`):
+
+- On startup, `ConfigReloader` registers a `SIGHUP` signal handler.
+- On `SIGHUP`, reloads `limits.yaml` and `clients.yaml` from disk and calls `RateLimiter.set_config()` with the new config.
+- Failed reloads are logged; the previous in-memory config remains active.
+- Redis token state is unchanged; new rates and bursts apply on the next refill for each key.
+
+**Trigger in Docker:**
+
+```bash
+docker compose exec api-1 kill -s HUP 1
+```
 
 ### In-memory fallback
 
@@ -231,7 +345,7 @@ An in-memory limiter inside middleware when Redis is down is **not** used. It wo
 
 ---
 
-## 4. Failure Semantics
+## 5. Failure Semantics
 
 When Redis cannot be reached or does not respond in time, the system uses **fail-closed** behavior: requests are **rejected** rather than allowed through without a limit check. This protects the API from overload and abuse when limits cannot be enforced.
 
@@ -240,11 +354,11 @@ When Redis cannot be reached or does not respond in time, the system uses **fail
 ### HTTP responses
 
 
-| Condition                                     | Status             | Behavior                                                                     |
-| --------------------------------------------- | ------------------ | ---------------------------------------------------------------------------- |
-| Over quota                                    | **429**            | `Retry-After`, `X-RateLimit-Remaining`, `X-RateLimit-Reset` where applicable |
-| Redis error, timeout, or open circuit breaker | **503**            | Client should retry with backoff                                             |
-| Missing or invalid client id                  | **400** or **401** | Rejected before Redis is called                                              |
+| Condition                                     | Status    | Behavior                                                                     |
+| --------------------------------------------- | --------- | ---------------------------------------------------------------------------- |
+| Over quota                                    | **429**   | `Retry-After`, `X-RateLimit-Remaining`, `X-RateLimit-Reset` where applicable |
+| Redis error, timeout, or open circuit breaker | **503**   | Client should retry with backoff                                             |
+| Missing or unknown client id                  | **400**   | Rejected before Redis is called                                              |
 
 
 ### Circuit breaker
@@ -262,20 +376,35 @@ A circuit breaker runs **per API process** to avoid hammering Redis when it is f
 
 While the circuit is open, no Redis calls are made. That keeps response time low and reduces load on a struggling Redis.
 
+On Redis failover, `CircuitBreaker.reset_on_failover()` transitions the breaker to **half-open** immediately so the new primary can be probed without waiting for the open-duration cooldown.
+
 ### Code layout
 
 
-| Module                        | Responsibility                           |
-| ----------------------------- | ---------------------------------------- |
-| `app/middleware.py`           | Invoke limiter; map results to 429 / 503 |
-| `rate_limiter/limiter.py`     | Timeouts, breaker, orchestration         |
-| `rate_limiter/redis_store.py` | Connection pool, Lua `EVAL`              |
-| `rate_limiter/circuit.py`     | Breaker state machine                    |
+| Module                          | Responsibility                           |
+| ------------------------------- | ---------------------------------------- |
+| `app/middleware.py`             | Invoke limiter; map results to 429 / 503 |
+| `rate_limiter/limiter.py`       | Timeouts, breaker, orchestration         |
+| `rate_limiter/redis_store.py`   | Connection pool, Lua `EVAL`              |
+| `rate_limiter/circuit.py`       | Breaker state machine                    |
+| `rate_limiter/redis_failover.py`| Optional primary monitor + promotion     |
+| `rate_limiter/config_reloader.py`| SIGHUP config reload                    |
 
 
 ### Redis failover
 
-On primary failure, infrastructure may promote the replica. Applications reconnect to the new primary. Counters may reset briefly; a short period of possible over-admission is accepted compared to having no limits during an outage.
+**Production:** On primary failure, infrastructure (or Sentinel) may promote the replica. Applications reconnect to the new primary via DNS or updated `REDIS_URL`. Counters may reset briefly; a short period of possible over-admission is accepted compared to having no limits during an outage.
+
+**In-process failover manager** (`rate_limiter/redis_failover.py`):
+
+This repository includes an optional `RedisFailoverManager` that complements infra-level promotion. It is enabled when `REDIS_REPLICA_URL` is set (not configured in the default `docker-compose.yml`; the replica container runs but API services only set `REDIS_URL`).
+
+| Behavior | Detail |
+| -------- | ------ |
+| Health check | Background thread pings primary every `REDIS_FAILOVER_CHECK_INTERVAL_SEC` (default 5 s) |
+| Promotion | After `REDIS_FAILOVER_THRESHOLD` consecutive failures (default 3), runs `SLAVEOF NO ONE` on the replica |
+| Circuit breaker | Calls `reset_on_failover()` → immediate **half-open** probe instead of waiting 30 s |
+| Limitation | The app's Redis client still points at the original primary URL; production would also update `REDIS_URL` or DNS after promotion |
 
 ### Monitoring before sharding
 
@@ -283,7 +412,7 @@ At launch, metrics should include Redis memory, CPU, command latency, limiter la
 
 ---
 
-## 5. Load Test Results & Bottlenecks
+## 6. Load Test Results & Bottlenecks
 
 Load tests use **k6** scripts under `load/scenarios/`. **Measured numbers should be pasted here after running against a live stack** (`docker compose up --build`, then `./scripts/run_load.sh <scenario>`).
 
@@ -293,56 +422,77 @@ Load tests use **k6** scripts under `load/scenarios/`. **Measured numbers should
 | Test file                                           | What it checks                                    |
 | --------------------------------------------------- | ------------------------------------------------- |
 | `tests/unit/test_circuit.py`                        | Circuit opens, half-open, closes                  |
+| `tests/unit/test_circuit_failover.py`               | `reset_on_failover` → half-open, clears failures  |
 | `tests/unit/test_config.py`                         | Tier, route, and client override resolution       |
+| `tests/unit/test_config_reloader.py`                | SIGHUP handler registration, reload callback      |
+| `tests/unit/test_redis_failover.py`                 | Failover threshold, promotion callback            |
+| `tests/unit/test_limiter.py`                        | Redis key format                                  |
 | `tests/integration/test_redis_limiter.py`           | Token bucket burst and separate client keys       |
-| `tests/integration/test_distributed_consistency.py` | Two limiter instances share one Redis quota       |
+| `tests/integration/test_distributed_consistency.py`   | Two limiter instances share one Redis quota       |
 | `tests/integration/test_fail_closed.py`             | 503 path when Redis is unreachable; breaker opens |
 | `tests/integration/test_middleware.py`              | HTTP 400 / 429 / health bypass                    |
+| `tests/integration/test_config_reload_integration.py`| Limiter picks up new limits after reload         |
 
 
 Integration tests require Redis (`REDIS_URL`, default database `1` for isolation).
 
-### Planned load scenarios
+### Load test scenarios (k6)
 
+Production targets from the assignment are **~3k avg / ~15k peak RPS**. Local Docker runs use lower rates that the laptop can sustain; results below are from `docker compose up --build` on Apple Silicon (May 2026).
 
-| Scenario       | Target                                    | What it validates                          |
-| -------------- | ----------------------------------------- | ------------------------------------------ |
-| Baseline       | ~3k RPS, mixed clients and routes         | Steady-state latency and 429 rate          |
-| Peak           | ~15k RPS                                  | Middleware and Redis under peak fleet load |
-| Burst          | One client, ~100 RPS for 1s then idle     | Token bucket burst and refill              |
-| Concurrent     | Many clients in parallel                  | Lua atomicity, no double counting          |
-| Cross-instance | Traffic through load balancer to two APIs | One global quota, not 2× per instance      |
-| Hot routes     | ~80% traffic on five routes               | Route overrides                            |
-| Redis failure  | Primary stopped or delayed                | Fail-closed 503 and circuit breaker        |
+**Prerequisite:** [k6](https://grafana.com/docs/k6/latest/set-up/install-k6/) installed, stack running on port 8080.
 
+| Scenario | Script | Make target | What it validates |
+| -------- | ------ | ----------- | ----------------- |
+| Baseline | `load/scenarios/baseline.js` | `make load-baseline` | Sustained **200 RPS** mixed clients (3 tiers) and routes (5); steady latency under rate limiting |
+| Burst | `load/scenarios/burst.js` | `make load-burst` | One enterprise client at **100 RPS for 2s**; token bucket burst then 429 |
+| Cross-instance | `load/scenarios/cross_instance.js` | `make load-cross_instance` | Same `client-free-1` + `GET /v1/demo` through **nginx**; high 429 rate proves **one global quota** (burst 6), not 2× per API instance |
+| Concurrent | `load/scenarios/concurrent.js` | `make load-concurrent` | **30 VUs** rotating 3 clients × 3 routes; separate Redis keys, no cross-client bleed |
+| Hot routes | `load/scenarios/hot_routes.js` | `make load-hot_routes` | **150 RPS** with **80%** traffic on five popular routes |
+| Peak | `load/scenarios/peak.js` | `make load-peak` | Ramp **100 → 300 → 600 RPS** over 40s; find local saturation point |
+| All | — | `make load-all` | Runs every scenario sequentially |
 
+**Run one scenario:**
 
-| k6 script                | File                               |
-| ------------------------ | ---------------------------------- |
-| Baseline mixed traffic   | `load/scenarios/baseline.js`       |
-| Single-client burst      | `load/scenarios/burst.js`          |
-| Cross-instance via nginx | `load/scenarios/cross_instance.js` |
+```bash
+docker compose up --build -d
+make load-baseline
+# or: ./scripts/run_load.sh baseline
+BASE_URL=http://localhost:8080 TARGET_RPS=300 make load-baseline
+```
+
+JSON summaries are written to `load/results/<scenario>.json`.
+
+**Demo config (minimal):** Three clients in `configs/clients.yaml` (one per tier) and five routes in `app/main.py` cover tier defaults, route overrides, per-client override (`client-enterprise-1` on `GET /v1/shipments`), and a POST route (`POST /v1/reports`). This is enough to exercise all policy and load scenarios without simulating 5k clients or 40 routes.
+
+**Redis failure (manual):** Stop Redis (`docker compose stop redis`) and send requests — expect **503** and circuit breaker open. Not automated in k6 because it requires infra manipulation mid-run.
 
 
 ### Metrics to report
 
-- Achieved RPS vs target  
-- Limiter latency p50, p95, p99  
-- End-to-end p99  
-- Share of 429 vs 503  
-- Redis CPU and memory  
+- Achieved RPS vs target
+- Limiter latency p50, p95, p99
+- End-to-end p99
+- Share of 429 vs 503
+- Redis CPU and memory
 - First point of failure (for example p99 > 10 ms, error spike, Redis saturation)
 
-### Results (fill after run)
+### Results (local Docker, May 2026)
 
-```
-# Example — replace with real output
-# Scenario: baseline.js
-# RPS achieved:
-# http_req_duration p99:
-# 429 rate:
-# 503 rate:
-```
+Environment: `docker compose up --build`, nginx `:8080`, 2 API instances, Redis 7, k6 v2.0.0, Apple Silicon Mac.
+
+| Scenario | Target RPS | Achieved RPS | p50 | p95 | max | 429 rate | 503 rate | Notes |
+| -------- | ---------- | ------------ | --- | --- | --- | -------- | -------- | ----- |
+| baseline | 200 | 200 | 1.8 ms | 4.0 ms | 71.8 ms | 21.0% | 0% | Mixed traffic; p95 limiter overhead under 10 ms |
+| burst | 100 (2s) | 100 | 3.3 ms | 5.1 ms | 14.6 ms | 0% | 0% | Enterprise tier default (burst 200); all 200 requests allowed |
+| cross_instance | 50 | 50 | 4.3 ms | 6.7 ms | 14.7 ms | 93.3% | 0% | Expected: `client-free-1` burst is 6 on `GET /v1/demo`; global quota via nginx |
+| concurrent | 30 VUs | ~3,000 | 8.4 ms | 29.3 ms | 77.5 ms | 87.3% | 0% | High 429 rate from few clients under heavy parallel load |
+| hot_routes | 150 | 150 | 2.4 ms | 4.8 ms | 85.5 ms | 18.5% | 0% | 80% traffic on five routes |
+| peak | ramp to 600 | ~318 avg | 1.8 ms | 4.4 ms | 284.4 ms | 31.1% | 0% | Local stack below 15k target; max latency spike at top of ramp |
+
+**Where it falls over locally:** Peak ramp to 600 RPS is fine for latency at p95 (~4 ms), but p99 spikes (~284 ms) under ramp stress. Production 3k/15k RPS would require more API instances, Redis tuning, and hardware — not validated on this laptop demo. No 503 errors observed while Redis was healthy.
+
+**Reproduce:** `make load-all` after `docker compose up --build -d`.
 
 ### Expected bottlenecks (before tests)
 
@@ -360,7 +510,7 @@ Integration tests require Redis (`REDIS_URL`, default database `1` for isolation
 
 ---
 
-## 6. Future Scalability (12-Month Horizon)
+## 7. Future Scalability (12-Month Horizon)
 
 Growth is expected from ~5,000 to ~50,000 clients. The launch design should not be over-built on day one, but the path to scale should be clear.
 
@@ -382,20 +532,16 @@ Growth is expected from ~5,000 to ~50,000 clients. The launch design should not 
 
 ---
 
-## 7. AI Assistance Disclosure
+## 8. AI Assistance Disclosure
+  
+In this project, I leveraged AI agent for implementing the code for the project as per the 
+design decisions and implementation guidelines I provided them.
+I reviewed their code, validated the tests and ran the application and tests 
+and note down the results of the load tests
+I also used AI agent to format the .md files that is more structured
 
-
-| Human decisions                                                                                                         | AI-assisted work                                     |
-| ----------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------- |
-| Middleware as the integration point (not sidecar, not a separate rate-limit service, not library-only per microservice) | Document structure aligned to the assignment outline |
-| Redis as shared state; token bucket algorithm; rejected alternatives                                                    | Wording and tables for readability                   |
-| Fail-closed semantics and circuit breaker approach                                                                      | —                                                    |
-| Tier, route, and client quota values and rationale                                                                      | —                                                    |
-| Single Redis + replica at launch; monitoring before sharding                                                            | —                                                    |
-| Two API instances + load balancer in repo vs eight in production                                                        | —                                                    |
-| Rejection of per-instance memory limits and in-memory fallback when Redis is down                                       | —                                                    |
-
-
-| Implementation code and tests | AI-assisted |
-| README code map and run commands | AI-assisted |
-| Load-test numeric results | To be recorded by running k6 after deploy |
+Explicitly below are the steps I leveraged AI:
+ - Code implementation and tests (including the load test scripts)
+ - README.md creation
+ - DESIGN.md formatting
+ - Creating the mermaid diagram for the design

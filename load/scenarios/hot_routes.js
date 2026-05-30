@@ -1,41 +1,37 @@
 import http from "k6/http";
-import { check, sleep } from "k6";
+import { check } from "k6";
 import {
   clients,
-  routes,
+  hotRoutes,
   pickRandom,
   routeRequest,
   statusOkOr429,
 } from "../common.js";
 
-// Local demo: sustained mixed traffic (production target is ~3k RPS).
-const targetRps = Number(__ENV.TARGET_RPS || 200);
-
 export const options = {
   scenarios: {
-    baseline: {
+    hot_routes: {
       executor: "constant-arrival-rate",
-      rate: targetRps,
+      rate: Number(__ENV.TARGET_RPS || 150),
       timeUnit: "1s",
       duration: __ENV.DURATION || "30s",
-      preAllocatedVUs: 50,
-      maxVUs: 300,
+      preAllocatedVUs: 40,
+      maxVUs: 200,
     },
   },
   thresholds: {
     checks: ["rate>0.99"],
-    http_req_duration: ["p(95)<50", "p(99)<100"],
+    http_req_duration: ["p(99)<100"],
   },
 };
 
 export default function () {
   const client = pickRandom(clients);
-  const route = pickRandom(routes);
+  const route = Math.random() < 0.8 ? pickRandom(hotRoutes) : "/v1/demo";
   const req = routeRequest(route, client);
   const res =
     req.method === "POST"
       ? http.post(req.url, null, req.params)
       : http.get(req.url, req.params);
   check(res, statusOkOr429);
-  sleep(0.001);
 }

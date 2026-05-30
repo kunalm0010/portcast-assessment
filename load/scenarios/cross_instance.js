@@ -1,18 +1,26 @@
 import http from "k6/http";
 import { check } from "k6";
-
-const baseUrl = __ENV.BASE_URL || "http://localhost:8080";
+import { baseUrl, statusOkOr429 } from "../common.js";
 
 export const options = {
-  vus: 20,
-  duration: "10s",
+  scenarios: {
+    cross_instance: {
+      executor: "constant-arrival-rate",
+      rate: Number(__ENV.TARGET_RPS || 50),
+      timeUnit: "1s",
+      duration: __ENV.DURATION || "15s",
+      preAllocatedVUs: 30,
+      maxVUs: 100,
+    },
+  },
+  thresholds: {
+    checks: ["rate>0.99"],
+  },
 };
 
 export default function () {
   const res = http.get(`${baseUrl}/v1/demo`, {
     headers: { "X-Client-Id": "client-free-1" },
   });
-  check(res, {
-    "status is 200 or 429": (r) => r.status === 200 || r.status === 429,
-  });
+  check(res, statusOkOr429);
 }
