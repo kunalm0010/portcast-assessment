@@ -4,7 +4,7 @@ REDIS_TEST_URL ?= redis://localhost:6379/1
 BASE_URL ?= http://localhost:8080
 
 .PHONY: setup up down logs test test-unit test-integration load load-all \
-	load-baseline load-burst load-cross_instance load-concurrent load-hot_routes load-peak
+	load-baseline load-burst load-cross_instance load-concurrent load-hot_routes load-peak load-enterprise_clients
 
 setup:
 	$(PYTHON) -m pip install ".[dev]"
@@ -53,7 +53,10 @@ load-hot_routes:
 load-peak:
 	BASE_URL=$(BASE_URL) ./scripts/run_load.sh peak
 
-load-all: load-baseline load-burst load-cross_instance load-concurrent load-hot_routes load-peak
+load-enterprise_clients:
+	BASE_URL=$(BASE_URL) ./scripts/run_load.sh enterprise_clients
+
+load-all: load-baseline load-burst load-cross_instance load-concurrent load-hot_routes load-peak load-enterprise_clients
 
 load:
 	$(MAKE) load-baseline

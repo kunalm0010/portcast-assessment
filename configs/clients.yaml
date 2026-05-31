@@ -2,6 +2,7 @@ clients:
   client-free-1: free
   client-standard-1: standard
   client-enterprise-1: enterprise
+  client-enterprise-2: enterprise
 
 overrides:
   client-enterprise-1:

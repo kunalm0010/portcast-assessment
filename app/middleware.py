@@ -41,7 +41,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
                 headers["Retry-After"] = str(result.retry_after)
             return JSONResponse(
                 status_code=503,
-                content={"detail": "Rate limiter unavailable"},
+                content={"detail": "Service unavailable"},
                 headers=headers,
             )
 
@@ -54,7 +54,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
                 headers["Retry-After"] = str(result.retry_after)
             return JSONResponse(
                 status_code=429,
-                content={"detail": "Rate limit exceeded"},
+                content={"detail": "Too many requests. Please retry later"},
                 headers=headers,
             )
 

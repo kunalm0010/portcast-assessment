@@ -17,7 +17,7 @@ RESULT="load/results/${SCENARIO}.json"
 
 if [[ ! -f "$SCRIPT" ]]; then
   echo "Unknown scenario: ${SCENARIO}"
-  echo "Available: baseline burst cross_instance concurrent hot_routes peak"
+  echo "Available: baseline burst cross_instance concurrent hot_routes peak enterprise_clients"
   exit 1
 fi
 

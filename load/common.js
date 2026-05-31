@@ -1,12 +1,19 @@
 // Shared clients and routes aligned with configs/clients.yaml and configs/limits.yaml.
 export const baseUrl = __ENV.BASE_URL || "http://localhost:8080";
 
-// One client per tier (free, standard, enterprise).
+// Clients aligned with configs/clients.yaml.
 export const clients = [
   "client-free-1",
   "client-standard-1",
   "client-enterprise-1",
+  "client-enterprise-2",
 ];
+
+// Enterprise tier without per-client overrides (uses tier/route defaults only).
+export const enterpriseDefaultClients = ["client-enterprise-2"];
+
+// Enterprise tier with per-client overrides in clients.yaml.
+export const enterpriseOverrideClients = ["client-enterprise-1"];
 
 // Five routes: tier defaults, route overrides, and client override on shipments.
 export const routes = [

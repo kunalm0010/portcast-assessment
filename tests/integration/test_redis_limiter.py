@@ -27,3 +27,16 @@ def test_different_clients_have_separate_buckets(rate_limiter) -> None:
         assert rate_limiter.allow("client-free-1", route).allowed is True
     assert rate_limiter.allow("client-free-1", route).allowed is False
     assert rate_limiter.allow("client-standard-1", route).allowed is True
+
+
+def test_enterprise_without_override_has_separate_bucket_from_enterprise_with_override(
+    rate_limiter,
+) -> None:
+    route = "GET /v1/shipments"
+    attempts = 0
+    while rate_limiter.allow("client-enterprise-1", route).allowed:
+        attempts += 1
+        assert attempts < 10_000
+
+    assert rate_limiter.allow("client-enterprise-1", route).allowed is False
+    assert rate_limiter.allow("client-enterprise-2", route).allowed is True
