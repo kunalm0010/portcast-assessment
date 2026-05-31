@@ -1,9 +1,11 @@
 # Distributed Rate Limiter
  
 In this document, I have captured the requirements, my design decisions & tradeoffs to meet the current requirements, 
-the code details, failure semantics, load test results after I executed them locally, a future scalability horizon
+the code details, failure semantics, load tests scenarios and results after I executed them locally, a future scalability horizon
 and where I leveraged AI to help me achieve the project goal.
 
+The 1st section gives a brief overview of the repository, the problem statement, how to execute the code and high level architecture.
+Starting from 2nd section, I have deep dived into each decision I took during the design and where it fits in the overall solution.
 ## Table of Contents
 
 - [1. System Architecture Overview](#1-system-architecture-overview)
@@ -59,24 +61,24 @@ The rate limiter should easily handle the following requirements**:**
 ### **High-level flow:**
 
 1. A client sends a request with a client identifier (for example `X-Client-Id`).
-2. A load balancer sends the request to any of the active API instance.
-3. **Middleware** runs before route handlers: it resolves the client tier and route, then checks the limit.
+2. A load balancer sends the request to any one of the active API instance
+3. **Middleware** runs before route handlers: it resolves the client tier and route via configuration, then checks the limit.
 4. A single **Redis** call (Lua script) updates shared token state and returns allow or deny.
 5. If allowed, the handler runs. If denied, the API returns **429**. If the limiter cannot run, the API returns **503** (fail-closed).
 
 **Note:** In a real production application, figuring out the tier for a client using the clientId will not be done via configuration,
-but for this demo to work, have hardcoded a few clients and their tiers in the relevant configurations.
+and for this demo, I have hardcoded a few clients and their tiers in the relevant configurations.
 
 **Components:**
 
-| Component                                                | Role                                                                        |
-| -------------------------------------------------------- | --------------------------------------------------------------------------- |
-| Load balancer                                            | Distributes traffic across instances; health checks remove failed instances |
-| API instances (8 in production, 2 in this repo for demo) | Stateless; middleware enforces limits on every request                      |
-| `rate_limiter` package                                   | Token bucket logic, config loading, Redis access, circuit breaker           |
-| Redis primary                                            | Shared counter state for all instances                                      |
-| Redis replica                                            | Async copy for failover; not used for limit checks at launch                |
-| Config files (`limits.yaml`, `clients.yaml`)             | Tier defaults, route overrides, client → tier mapping                       |
+| Component                                                     | Role                                                                                                                                                         |
+|---------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Load balancer                                                 | Distributes traffic across instances; <br/> Currently running on default round robin for simplicity, can be easily configured to have ip_hash or random, etc |
+| API instances (8 in production, used 2 in this repo for demo) | Stateless; middleware enforces limits on every request                                                                                                       |
+| `rate_limiter` package                                        | Token bucket logic of rate limiting, config loading, Redis access, circuit breaker                                                                           |
+| Redis primary                                                 | Shared counter state for all instances                                                                                                                       |
+| Redis replica (Optional, activates when replica URL is set)   | Async copy for failover; Optionally configure it to continuously monitor primary redis and promote itself as primary if required                             |
+| Config files (`limits.yaml`, `clients.yaml`)                  | Tier defaults, route overrides, client → tier mapping                                                                                                        |
 
 
 **Diagram:**
@@ -146,7 +148,7 @@ Once the docker is up, in a separate terminal tab:
 ```bash
 curl -H "X-Client-Id: client-free-1" http://localhost:8080/v1/demo -v
 ```
-
+You can further find more routes in app/main.py and clients configured in the /configs/clients.yaml. Per route overrides can be found in /configs/limits.yaml.
 
 | Service               | Port          | Notes                                                |
 | --------------------- | ------------- | ---------------------------------------------------- |
@@ -206,15 +208,16 @@ See [`.env.example`](.env.example) for a copy-paste template.
 
 ## 2. Integration Shape & Strategy
 
-Rate limiting is applied in **middleware** that runs on every request before business logic. A small shared Python package (`rate_limiter`) holds the core logic; middleware calls into it. The package is not exposed as a separate network service.
+Rate limiting is applied in **middleware** that runs on every request(except for the exempty paths like /health) before business logic. A small shared Python package (`rate_limiter`) holds the core logic; middleware calls into it. The package is not exposed as a separate network service.
+Middleware has an abstracted interaction with the rate limiter ensuring they are not tightly coupled and gives flexibility to our solution.
 
 ### Chosen approach
 
 
 | Piece                  | Role                                                                                           |
-| ---------------------- | ---------------------------------------------------------------------------------------------- |
+| ---------------------- |------------------------------------------------------------------------------------------------|
 | Middleware             | Reads client id and route, calls the limiter, returns 429 or 503 or passes the request through |
-| `rate_limiter` package | Token bucket, Redis Lua script, config load, circuit breaker                                   |
+| `rate_limiter` package | Token bucket algorithm, Redis Lua script, config load, circuit breaker                         |
 
 
 Config changes are applied at the middleware layer (reload YAML or redeploy instances) without updating many downstream services separately.
@@ -226,13 +229,13 @@ Config changes are applied at the middleware layer (reload YAML or redeploy inst
 - Missing or unknown `X-Client-Id` → **400** (rejected before Redis is called)
 - Allowed responses include `X-RateLimit-Remaining` and `X-RateLimit-Reset` headers
 
-### Rejected options
+### Rejected integration options
 
 
 | Option                                          | Reason for rejection                                                                                                                                               |
-| ----------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| ----------------------------------------------- |--------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | **Sidecar**                                     | An extra container and network hop per service; higher latency and more operations when many microservices exist                                                   |
-| **Dedicated rate-limit microservice**           | Every request needs an extra RPC before the API; middleware plus one Redis call is simpler and faster                                                              |
+| **Dedicated rate-limit microservice**           | Every request needs an extra API call over network before the API; middleware plus one Redis call is simpler and faster                                            |
 | **Library only, embedded in each microservice** | Fleet-wide limits still need shared Redis, but each service must be redeployed to change limits or library version; risk of inconsistent behavior across instances |
 | **In-memory limiting per instance**             | Does not meet the requirement; quotas would not be shared across the fleet                                                                                         |
 
@@ -243,7 +246,7 @@ A library is still used, but only as implementation code called from middleware�
 
 ## 3. Rate Limiting Algorithm
 
-### Selected algorithm: token bucket
+### Selected algorithm: token bucket (logic executed as a lua script in redis instance)
 
 
 | Algorithm          | Outcome      | Reason                                                                                                     |
@@ -253,6 +256,7 @@ A library is still used, but only as implementation code called from middleware�
 | **Token bucket**   | **Selected** | Steady `rate_per_sec` plus `burst` capacity; fits “many requests in one second, then idle”                 |
 | Leaky bucket       | Rejected     | Smooths traffic too aggressively for bursty API clients                                                    |
 
+With the loose coupling between middleware and rate limiter, different algorithms can be implemented and integrated without changing the entire code.
 
 ## 4. Storage Choice
 
@@ -264,13 +268,14 @@ Selected Redis to be the storage option for storing the counters for each client
   - This ensures our API latency is impacted negligibly by our rate limiter (<10ms).
 - Its single threaded thus avoid consistency issues due to concurrent operations.
   - HOWEVER, since there are two steps involved with each operation (check counter and update), it requires transactional support to perform this operation atomically. Solved this using a LUA script, more details are below.
-- Can easily handle thoughputs of 100k to 1M RPS, sufficient for our usecase (even with scale 12months down the line)
+- Can easily handle throughputs of 100k to 1M RPS, sufficient for our usecase (even with scale 12months down the line)
 - Can easily handle storage of the desired set of client and route keys. See calculations below.
-- Since the counters change very frequently, storing them in a persist storage adds latency and cost.
+- TTL is attached to each key in case the key is stale for atleast 60 sec.
+- Since the counters change very frequently, storing them in a persist storage adds latency and cost and is not necessary.
 
 ### Tradeoff
 
-- Redis stores data in-memory and in case of instance crashing, the current data would be lost and when the system comes up, the counters will be reset.
+- Redis stores data in-memory and in case of redis instance crashing, due to the async replication lag, there can be minor inconsistencies when backup instance is promoted.
 - However, a rate limiter does not store any critical information about the users and thus is a relevant tradeoff to make.
 
 ### Redis + Lua implementation
@@ -332,12 +337,6 @@ Config is loaded at startup and can be hot-reloaded without restarting the API p
 - On `SIGHUP`, reloads `limits.yaml` and `clients.yaml` from disk and calls `RateLimiter.set_config()` with the new config.
 - Failed reloads are logged; the previous in-memory config remains active.
 - Redis token state is unchanged; new rates and bursts apply on the next refill for each key.
-
-**Trigger in Docker:**
-
-```bash
-docker compose exec api-1 kill -s HUP 1
-```
 
 ### In-memory fallback
 
@@ -438,19 +437,19 @@ Integration tests require Redis (`REDIS_URL`, default database `1` for isolation
 
 ### Load test scenarios (k6)
 
-Production targets from the assignment are **~3k avg / ~15k peak RPS**. Local Docker runs use lower rates that the laptop can sustain; results below are from `docker compose up --build` on Apple Silicon (May 2026).
+Production targets from the assignment are **~3k avg / ~15k peak RPS**. Local Docker runs use lower rates that the laptop can sustain; results below are from `docker compose up --build` on Apple Silicon M1 Chip.
 
 **Prerequisite:** [k6](https://grafana.com/docs/k6/latest/set-up/install-k6/) installed, stack running on port 8080.
 
-| Scenario | Script | Make target | What it validates |
-| -------- | ------ | ----------- | ----------------- |
-| Baseline | `load/scenarios/baseline.js` | `make load-baseline` | Sustained **200 RPS** mixed clients (3 tiers) and routes (5); steady latency under rate limiting |
-| Burst | `load/scenarios/burst.js` | `make load-burst` | One enterprise client at **100 RPS for 2s**; token bucket burst then 429 |
+| Scenario | Script | Make target | What it validates                                                                                                                     |
+| -------- | ------ | ----------- |---------------------------------------------------------------------------------------------------------------------------------------|
+| Baseline | `load/scenarios/baseline.js` | `make load-baseline` | Sustained **200 RPS** mixed clients (3 tiers) and routes (5); steady latency under rate limiting                                      |
+| Burst | `load/scenarios/burst.js` | `make load-burst` | One enterprise client at **200 RPS for 2s**; token bucket burst then 429                                                              |
 | Cross-instance | `load/scenarios/cross_instance.js` | `make load-cross_instance` | Same `client-free-1` + `GET /v1/demo` through **nginx**; high 429 rate proves **one global quota** (burst 6), not 2× per API instance |
-| Concurrent | `load/scenarios/concurrent.js` | `make load-concurrent` | **30 VUs** rotating 3 clients × 3 routes; separate Redis keys, no cross-client bleed |
-| Hot routes | `load/scenarios/hot_routes.js` | `make load-hot_routes` | **150 RPS** with **80%** traffic on five popular routes |
-| Peak | `load/scenarios/peak.js` | `make load-peak` | Ramp **100 → 300 → 600 RPS** over 40s; find local saturation point |
-| All | — | `make load-all` | Runs every scenario sequentially |
+| Concurrent | `load/scenarios/concurrent.js` | `make load-concurrent` | **30 VUs** rotating 3 clients × 3 routes; separate Redis keys, no cross-client bleed                                                  |
+| Hot routes | `load/scenarios/hot_routes.js` | `make load-hot_routes` | **150 RPS** with **80%** traffic on five popular routes                                                                               |
+| Peak | `load/scenarios/peak.js` | `make load-peak` | Ramp **100 → 300 → 600 RPS** over 40s; find local saturation point                                                                    |
+| All | — | `make load-all` | Runs every scenario sequentially                                                                                                      |
 
 **Run one scenario:**
 
@@ -463,7 +462,7 @@ BASE_URL=http://localhost:8080 TARGET_RPS=300 make load-baseline
 
 JSON summaries are written to `load/results/<scenario>.json`.
 
-**Demo config (minimal):** Three clients in `configs/clients.yaml` (one per tier) and five routes in `app/main.py` cover tier defaults, route overrides, per-client override (`client-enterprise-1` on `GET /v1/shipments`), and a POST route (`POST /v1/reports`). This is enough to exercise all policy and load scenarios without simulating 5k clients or 40 routes.
+**Demo config (minimal):** Four clients in `configs/clients.yaml` (one per tier and one enterprise extra) and five routes in `app/main.py` cover tier defaults, route overrides, per-client override (`client-enterprise-1` on `GET /v1/shipments`), and a POST route (`POST /v1/reports`). This is enough to exercise all policy and load scenarios without simulating 5k clients or 40 routes.
 
 **Redis failure (manual):** Stop Redis (`docker compose stop redis`) and send requests — expect **503** and circuit breaker open. Not automated in k6 because it requires infra manipulation mid-run.
 
@@ -481,32 +480,18 @@ JSON summaries are written to `load/results/<scenario>.json`.
 
 Environment: `docker compose up --build`, nginx `:8080`, 2 API instances, Redis 7, k6 v2.0.0, Apple Silicon Mac.
 
-| Scenario | Target RPS | Achieved RPS | p50 | p95 | max | 429 rate | 503 rate | Notes |
-| -------- | ---------- | ------------ | --- | --- | --- | -------- | -------- | ----- |
-| baseline | 200 | 200 | 1.8 ms | 4.0 ms | 71.8 ms | 21.0% | 0% | Mixed traffic; p95 limiter overhead under 10 ms |
-| burst | 100 (2s) | 100 | 3.3 ms | 5.1 ms | 14.6 ms | 0% | 0% | Enterprise tier default (burst 200); all 200 requests allowed |
-| cross_instance | 50 | 50 | 4.3 ms | 6.7 ms | 14.7 ms | 93.3% | 0% | Expected: `client-free-1` burst is 6 on `GET /v1/demo`; global quota via nginx |
-| concurrent | 30 VUs | ~3,000 | 8.4 ms | 29.3 ms | 77.5 ms | 87.3% | 0% | High 429 rate from few clients under heavy parallel load |
-| hot_routes | 150 | 150 | 2.4 ms | 4.8 ms | 85.5 ms | 18.5% | 0% | 80% traffic on five routes |
-| peak | ramp to 600 | ~318 avg | 1.8 ms | 4.4 ms | 284.4 ms | 31.1% | 0% | Local stack below 15k target; max latency spike at top of ramp |
+| Scenario | Target RPS  | Achieved RPS | p95    | p99     | max      | 429 rate | 503 rate | Notes                                                                          |
+| -------- |-------------|--------------|--------|---------|----------|----------| -------- |--------------------------------------------------------------------------------|
+| baseline | 200         | 200          | 1.8 ms | 4.0 ms  | 71.8 ms  | 21.0%    | 0% | Mixed traffic; p95 limiter overhead under 10 ms                                |
+| burst | 200 (2s)    | 200          | 7.2 ms | 12.5 ms | 21.2 ms  | 0.75%    | 0% | Enterprise tier default (burst 200); 3 / 400 requests rate limited             |
+| cross_instance | 50          | 50           | 7.2 ms | 14.0 ms | 47.1 ms  | 93.3%    | 0% | Expected: `client-free-1` burst is 6 on `GET /v1/demo`; global quota via nginx |
+| concurrent | 30 VUs      | ~3,000       | 8.4 ms | 29.3 ms | 77.5 ms  | 87.3%    | 0% | High 429 rate from few clients under heavy parallel load                       |
+| hot_routes | 150         | 150          | 2.4 ms | 4.8 ms  | 85.5 ms  | 18.5%    | 0% | 80% traffic on five routes                                                     |
+| peak | ramp to 600 | ~318 avg     | 1.8 ms | 4.4 ms  | 284.4 ms | 31.1%    | 0% | Local stack below 15k target; max latency spike at top of ramp                 |
 
-**Where it falls over locally:** Peak ramp to 600 RPS is fine for latency at p95 (~4 ms), but p99 spikes (~284 ms) under ramp stress. Production 3k/15k RPS would require more API instances, Redis tuning, and hardware — not validated on this laptop demo. No 503 errors observed while Redis was healthy.
+**Where it falls over locally:** Peak ramp to 600 RPS is fine for latency at p95 (~4 ms), but p99 spikes (~284 ms) under ramp stress. Production 3k/15k RPS would require more API instances than 2 instances, Redis tuning, and hardware — not validated on this laptop demo. No 503 errors observed while Redis was healthy.
 
 **Reproduce:** `make load-all` after `docker compose up --build -d`.
-
-### Expected bottlenecks (before tests)
-
-
-| Failure mode                     | Expected behavior                                                              |
-| -------------------------------- | ------------------------------------------------------------------------------ |
-| Redis primary unavailable        | **503** on affected requests; no silent unlimited traffic                      |
-| Redis slow                       | Risk of exceeding 10 ms budget; mitigated by timeout and circuit breaker       |
-| Redis failover                   | Short 503 window or counter reset; possible brief over-admission               |
-| Single API instance down         | No quota impact; load balancer routes to other instances                       |
-| Hot Redis key                    | Latency on one key; mitigated by per-client overrides, then sharding if needed |
-| Too few API instances at 15k RPS | CPU or connection limits on instances; scale out (stateless)                   |
-| Config rollout                   | Short period where instances may enforce slightly different limits             |
-
 
 ---
 
@@ -514,18 +499,17 @@ Environment: `docker compose up --build`, nginx `:8080`, 2 API instances, Redis 
 
 Growth is expected from ~5,000 to ~50,000 clients. The launch design should not be over-built on day one, but the path to scale should be clear.
 
+| Area                 | At launch                                                   | At ~12 months                                                                                                                                                                         |
+| -------------------- |-------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Clients              | ~5k                                                         | ~50k                                                                                                                                                                                  |
+| Redis                | One primary + one replica                                   | First try with bigger instance and **Redis Cluster** if CPU, latency, or ops metrics are at capacity; memory alone can still fit on one large node (~4 GB upper-bound estimate for all active keys) |
+| API instances        | 8 behind load balancer; autoscaling on CPU, RPS, or latency | Larger autoscaled fleet; instances remain stateless                                                                                                                                   |
+| Config               | YAML files, reload on SIGHUP or deploy                      | **etcd** or **ZooKeeper**: gateways watch a key and swap config in memory without redeploying all services                                                                            |
+| Hot clients / routes | Route and client overrides in config                        | Monitoring-driven overrides; shard Redis only if hot keys remain after tuning                                                                                                         |
+| Regions              | Single region                                               | Optional regional Redis and routing if latency requires it                                                                                                                            |
+| Ingress              | Middleware in the API process                               | Optional managed ingress (for example AWS API Gateway with a custom authorizer) still backed by Redis                                                                                 |
 
-| Area                 | At launch                                                   | At ~12 months                                                                                                                                               |
-| -------------------- | ----------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Clients              | ~5k                                                         | ~50k                                                                                                                                                        |
-| Redis                | One primary + one replica                                   | **Redis Cluster** if CPU, latency, or ops metrics require it; memory alone can still fit on one large node (~4 GB upper-bound estimate for all active keys) |
-| API instances        | 8 behind load balancer; autoscaling on CPU, RPS, or latency | Larger autoscaled fleet; instances remain stateless                                                                                                         |
-| Config               | YAML files, reload on interval or deploy                    | **etcd** or **ZooKeeper**: gateways watch a key and swap config in memory without redeploying all services                                                  |
-| Hot clients / routes | Route and client overrides in config                        | Monitoring-driven overrides; shard Redis only if hot keys remain after tuning                                                                               |
-| Regions              | Single region                                               | Optional regional Redis and routing if latency requires it                                                                                                  |
-| Ingress              | Middleware in the API process                               | Optional managed ingress (for example AWS API Gateway with a custom authorizer) still backed by Redis                                                       |
-
-
+Optionally for future, a more managed solution like AWS Fargate and ALB along with ElastiCache Redis is a good choice to support 15k RPS.
 **Sharding approach (if needed):** Keys `rl:{client_id}:{route}` spread across cluster slots naturally. Hash tags are avoided unless a specific hot-key problem requires them. Regional shards are a product decision (per-region vs global quota).
 
 **Config without redeploy (etcd / ZooKeeper):** A new limit document is written to a watched path. Each middleware instance reloads an in-memory snapshot when the watch fires. Redis token state is unchanged; new rates and bursts apply on the next refill.

@@ -11,7 +11,6 @@ docker compose up --build
 | Endpoint | URL |
 |----------|-----|
 | Load-balanced API | http://localhost:8080 |
-| API instance 1 (direct) | http://localhost:8080 via nginx only in compose |
 | Health | http://localhost:8080/health |
 
 Example request:
@@ -19,6 +18,7 @@ Example request:
 ```bash
 curl -s -H "X-Client-Id: client-free-1" http://localhost:8080/v1/demo -v
 ```
+See more routes and clients in the /configs directory yaml files
 
 ## Libraries and why they were chosen
 

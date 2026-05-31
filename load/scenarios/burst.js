@@ -6,7 +6,7 @@ export const options = {
   scenarios: {
     burst: {
       executor: "constant-arrival-rate",
-      rate: Number(__ENV.BURST_RPS || 100),
+      rate: Number(__ENV.BURST_RPS || 200),
       timeUnit: "1s",
       duration: __ENV.DURATION || "2s",
       preAllocatedVUs: 20,
