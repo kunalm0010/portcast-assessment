@@ -264,7 +264,7 @@ Selected Redis to be the storage option for storing the counters for each client
 
 ### Why redis?
 
-- Its super fast as it stores data in-memory (RAM) thus allows for fast writes and reads (generally in nanosecs latency)
+- Its super fast as it stores data in-memory (RAM) thus allows for fast writes and reads.
   - This ensures our API latency is impacted negligibly by our rate limiter (<10ms).
 - Its single threaded thus avoid consistency issues due to concurrent operations.
   - HOWEVER, since there are two steps involved with each operation (check counter and update), it requires transactional support to perform this operation atomically. Solved this using a LUA script, more details are below.
