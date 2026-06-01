@@ -480,16 +480,30 @@ JSON summaries are written to `load/results/<scenario>.json`.
 
 Environment: `docker compose up --build`, nginx `:8080`, 2 API instances, Redis 7, k6 v2.0.0, Apple Silicon Mac.
 
-| Scenario | Target RPS  | Achieved RPS | p95    | p99     | max      | 429 rate | 503 rate | Notes                                                                          |
-| -------- |-------------|--------------|--------|---------|----------|----------| -------- |--------------------------------------------------------------------------------|
-| baseline | 200         | 200          | 1.8 ms | 4.0 ms  | 71.8 ms  | 21.0%    | 0% | Mixed traffic; p95 limiter overhead under 10 ms                                |
-| burst | 200 (2s)    | 200          | 7.2 ms | 12.5 ms | 21.2 ms  | 0.75%    | 0% | Enterprise tier default (burst 200); 3 / 400 requests rate limited             |
-| cross_instance | 50          | 50           | 7.2 ms | 14.0 ms | 47.1 ms  | 93.3%    | 0% | Expected: `client-free-1` burst is 6 on `GET /v1/demo`; global quota via nginx |
-| concurrent | 30 VUs      | ~3,000       | 8.4 ms | 29.3 ms | 77.5 ms  | 87.3%    | 0% | High 429 rate from few clients under heavy parallel load                       |
-| hot_routes | 150         | 150          | 2.4 ms | 4.8 ms  | 85.5 ms  | 18.5%    | 0% | 80% traffic on five routes                                                     |
-| peak | ramp to 600 | ~318 avg     | 1.8 ms | 4.4 ms  | 284.4 ms | 31.1%    | 0% | Local stack below 15k target; max latency spike at top of ramp                 |
+| Scenario           | Target RPS | Achieved RPS | p90     | p95     | max      | 429 rate | 503 rate | Notes                                                                                                              |
+|--------------------|------------|--------------|---------|---------|----------|--------| -------- |--------------------------------------------------------------------------------------------------------------------|
+| baseline           | 200        | 200          | 3.5 ms  | 4.0 ms  | 71.8 ms  | 21.0%  | 0% | Mixed traffic; p95 limiter overhead under 10 ms, variable limits causing rate limiting for few clients as expected |
+| burst              | 200 (2s)   | 200          | 5.6 ms  | 7.2 ms  | 21.2 ms  | 0.75%  | 0% | Enterprise tier default (burst 200); 3 / 400 requests rate limited                                                 |
+| cross_instance     | 50         | 50           | 5.6 ms  | 7.2 ms  | 47.1 ms  | 93.3%  | 0% | Expected: `client-free-1` burst is 6 on `GET /v1/demo`; global quota via nginx                                     |
+| concurrent         | 30 VUs     | ~3,000       | 16.2 ms | 29.3 ms | 77.5 ms  | 87.3%  | 0% | High 429 rate from few clients under heavy parallel load                                                           |
+| hot_routes         | 150        | 150          | 4.0 ms  | 4.8 ms  | 85.5 ms  | 18.5%  | 0% | 80% traffic on five routes                                                                                         |
+| peak               | ramp to 600 | ~318 avg     | 3.3 ms  | 4.4 ms  | 284.4 ms | 31.1%  | 0% | Local stack below 15k target; max latency spike at top of ramp                                                     |
+| enterprise_clients | 400        | ~440         | 6.2 ms  | 8.3 ms  | 86.5 ms  | 0%     | 0% | Enterprise clients able to handle sustained load                                                                   |
 
-**Where it falls over locally:** Peak ramp to 600 RPS is fine for latency at p95 (~4 ms), but p99 spikes (~284 ms) under ramp stress. Production 3k/15k RPS would require more API instances than 2 instances, Redis tuning, and hardware — not validated on this laptop demo. No 503 errors observed while Redis was healthy.
+** Key Findings from the load tests**:
+
+1. The system has not crashed even under 3000 RPS for 15s (no 503s).
+2. Latency takes a lit at 3000RPS but that is expected on a local machine.
+3. The system is able to handle bursts mode of 200 RPS easily with only 3% rate limits for enterprise customer with configured at 200 RPS burst.
+4. For hot routes serving 80% traffic, the latency remains well within 10s (p95 <5s).
+5. The baseline test tests across clients and routes and the p95 latency is <5s even at 200 RPS
+6. The system is able to handle shared limits across service instances
+7. Peak ramp to 600 RPS is fine for latency at p95 (~4 ms), but p99 spikes (~284 ms) under ramp stress. 
+8. Production 3k/15k RPS would require more API instances than 2 instances, Redis tuning, and hardware
+8. No 503 errors observed while Redis was healthy.
+
+
+**Where it falls over locally:** 
 
 **Reproduce:** `make load-all` after `docker compose up --build -d`.
 
