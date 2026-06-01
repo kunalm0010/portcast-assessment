@@ -181,8 +181,8 @@ make load-all
 # or individual scenarios:
 make load-baseline load-burst load-cross_instance load-concurrent load-hot_routes load-peak
 ```
-
 Set `BASE_URL` if needed (default `http://localhost:8080`). See [§6 Load Test Results](#6-load-test-results--bottlenecks) for scenario descriptions and measured numbers.
+**Note**: All services and load tests are intended to be run on a developer's local machine using Docker/Docker Compose. No cloud or production resource sizing is assumed.
 
 **Environment variables:**
 
