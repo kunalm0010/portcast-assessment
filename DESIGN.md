@@ -34,10 +34,9 @@ Starting from 2nd section, I have deep dived into each decision I took during th
   - [Monitoring before sharding](#monitoring-before-sharding)
 - [6. Load Test Results & Bottlenecks](#6-load-test-results--bottlenecks)
   - [Automated tests (implemented)](#automated-tests-implemented)
-  - [Planned load scenarios](#planned-load-scenarios)
+  - [Load test scenarios (k6)](#load-test-scenarios-k6)
   - [Metrics to report](#metrics-to-report)
-  - [Results (fill after run)](#results-fill-after-run)
-  - [Expected bottlenecks (before tests)](#expected-bottlenecks-before-tests)
+  - [Results (local Docker)](#results-local-docker)
 - [7. Future Scalability (12-Month Horizon)](#7-future-scalability-12-month-horizon)
 - [8. AI Assistance Disclosure](#8-ai-assistance-disclosure)
 
@@ -413,7 +412,7 @@ At launch, metrics should include Redis memory, CPU, command latency, limiter la
 
 ## 6. Load Test Results & Bottlenecks
 
-Load tests use **k6** scripts under `load/scenarios/`. **Measured numbers should be pasted here after running against a live stack** (`docker compose up --build`, then `./scripts/run_load.sh <scenario>`).
+Load tests use **k6** scripts under `load/scenarios/`. Measured numbers from a live local stack are in [Results (local Docker)](#results-local-docker) below; reproduce with `docker compose up --build`, then `make load-all` (or `./scripts/run_load.sh <scenario>`).
 
 ### Automated tests (implemented)
 
@@ -476,9 +475,9 @@ JSON summaries are written to `load/results/<scenario>.json`.
 - Redis CPU and memory
 - First point of failure (for example p99 > 10 ms, error spike, Redis saturation)
 
-### Results (local Docker, May 2026)
+### Results (local Docker)
 
-Environment: `docker compose up --build`, nginx `:8080`, 2 API instances, Redis 7, k6 v2.0.0, Apple Silicon Mac.
+Environment: `docker compose up --build`, nginx `:8080`, 2 API instances, Redis 7, k6, Apple Silicon Mac.
 
 | Scenario           | Target RPS | Achieved RPS | p90     | p95     | max      | 429 rate | 503 rate | Notes                                                                                                              |
 |--------------------|------------|--------------|---------|---------|----------|--------| -------- |--------------------------------------------------------------------------------------------------------------------|
@@ -492,18 +491,18 @@ Environment: `docker compose up --build`, nginx `:8080`, 2 API instances, Redis 
 
 ** Key Findings from the load tests**:
 
-1. The system has not crashed even under 3000 RPS for 15s (no 503s).
-2. Latency takes a lit at 3000RPS but that is expected on a local machine.
-3. The system is able to handle bursts mode of 200 RPS easily with only 3% rate limits for enterprise customer with configured at 200 RPS burst.
-4. For hot routes serving 80% traffic, the latency remains well within 10s (p95 <5s).
-5. The baseline test tests across clients and routes and the p95 latency is <5s even at 200 RPS
-6. The system is able to handle shared limits across service instances
-7. Peak ramp to 600 RPS is fine for latency at p95 (~4 ms), but p99 spikes (~284 ms) under ramp stress. 
-8. Production 3k/15k RPS would require more API instances than 2 instances, Redis tuning, and hardware
-8. No 503 errors observed while Redis was healthy.
+1. The system did not crash even under ~3,000 RPS for 15s (no 503s).
+2. Latency takes a hit at ~3,000 RPS, but that is expected on local machine.
+3. The system handles burst mode of 200 RPS easily, with only ~3% rate limits for an enterprise client configured at 200 RPS burst.
+4. For hot routes serving 80% of traffic, latency stays well within budget (p95 <5 ms).
+5. The baseline test spans clients and routes; p95 latency is <5 ms even at 200 RPS.
+6. The system enforces shared (global) limits across service instances.
+7. Peak ramp to 600 RPS is fine at p95 (~4 ms); the p99 threshold (<200 ms) still passed, with a single max outlier of ~284 ms at the top of the ramp.
+8. Production 3k/15k RPS would require more than 2 API instances, Redis tuning, and appropriate hardware.
+9. No 503 errors were observed while Redis was healthy.
 
 
-**Where it falls over locally:** 
+**Where it falls over locally:** On a single laptop with 2 API instances, the latency tail grows as concurrency rises (concurrent p95 ~29 ms, peak max ~284 ms) well before the ~15k RPS production target. The bottleneck is the API tier under parallel load on one machine — not Redis, which stayed healthy with zero 503s throughout. The first improvements would be a non-blocking (async) Redis client to avoid stalling the event loop, plus more API instances on real hardware.
 
 **Reproduce:** `make load-all` after `docker compose up --build -d`.
 
